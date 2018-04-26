@@ -23,7 +23,7 @@ function createDBUser(event, callback) {
     UpdateExpression: "set ExpirationDate = :e, ShoutdownHours = :h, Active = :a",
     ExpressionAttributeValues: {
       ":e": event.enddate.getTime(),
-      ":h": event.shoutdown,
+      ":h": event.shutdown,
       ":a": true
     },
     TableName: process.env.TABLE_NAME
@@ -90,7 +90,7 @@ function createTempUser(event, callback) {
   var params = {
     DurationSeconds: 3600 * 12,
     ExternalId: event.username,
-    RoleArn: "arn:aws:iam::827587842911:role/federatedRole",
+    RoleArn: process.env.ROLE,
     RoleSessionName: event.username
   };
   sts.assumeRole(params, function(err, data) {
@@ -367,7 +367,7 @@ exports.writeUser = function(event, context, callback) {
   event.enddate.setMinutes(event.enddate.getMinutes() + 20);
   event.shoutdown = parseInt(event.shutdownHours, 10);
 
-  //createTempUser(event, callback);
-  event.Policy = null;
-  listPolicies(event, callback);
+  createTempUser(event, callback);
+  //event.Policy = null;
+  //listPolicies(event, callback);
 };

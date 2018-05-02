@@ -121,11 +121,11 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 				removeSubnets(ec2, vpcs);
 				removeSubnets(ec2, user);
 				removeInternetGateways(ec2, vpcs);
+				removeInternetGateways(ec2, user);
 				removeCustomerGateways(ec2, user);
 				removeEgressOnlyInternetGateways(ec2, vpcs);
 				removeVpnGateways(ec2, vpcs);
 				removeVpnGateways(ec2, user);
-				removeVpnConnections(ec2, vpcs);
 				removeVpnConnections(ec2, user);
 				removeSecurityGroups(ec2, vpcs);
 				removeSecurityGroups(ec2, user);
@@ -138,12 +138,12 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 
 				removeFpgaImages(ec2, vpcs, user);
 				removeImages(ec2, vpcs, user);
-				removeBundleTasks(ec2, vpcs, user);
+				//removeBundleTasks(ec2, vpcs, user);
 				removeDhcpOptions(ec2, vpcs, user);
 				removeVolumes(ec2, vpcs, user);
 				removeSnapshots(ec2, vpcs, user);
 				removeAddresses(ec2, vpcs, user);
-				removeLaunchTemplates(ec2, vpcs);
+				//removeLaunchTemplates(ec2, vpcs);
 				removeLaunchTemplates(ec2, user);
 				removeSpotInstanceRequests(ec2, vpcs, user);
 
@@ -184,9 +184,9 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 				keys.add(inst.getKeyName());
 			}
 		}
-		if (System.getenv("TEST_USER") != null) {
-			instances.add("i-123");
-		}
+//		if (System.getenv("TEST_USER") != null) {
+//			instances.add("i-123");
+//		}
 	}
 
 	void getInstancesInVpcs(AmazonEC2 ec2, ArrayList<String> vpcs, ArrayList<String> instances,
@@ -259,7 +259,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 	}
 
 	void removeNatGateways(AmazonEC2 ec2, ArrayList<String> vpcs) {
-		System.out.println("Removing NatGateways...");
+		System.out.print("Removing NatGateways...");
 		// get id
 		DescribeNatGatewaysRequest dRequest = new DescribeNatGatewaysRequest();
 		Filter filter = new Filter();
@@ -271,16 +271,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteNatGatewayRequest request = new DeleteNatGatewayRequest();
+				System.out.print(" "+item.getNatGatewayId()+";");
 				request.withNatGatewayId(item.getNatGatewayId());
 				ec2.deleteNatGateway(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 	
 	void removeNatGateways(AmazonEC2 ec2, String user) {
-		System.out.println("Removing NatGateways...");
+		System.out.print("Removing NatGateways by tag...");
 		// get id
 		DescribeNatGatewaysRequest dRequest = new DescribeNatGatewaysRequest();
 		Filter filter = new Filter();
@@ -292,16 +294,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteNatGatewayRequest request = new DeleteNatGatewayRequest();
+				System.out.print(" "+item.getNatGatewayId()+";");
 				request.withNatGatewayId(item.getNatGatewayId());
 				ec2.deleteNatGateway(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeFpgaImages(AmazonEC2 ec2, ArrayList<String> vpcs, String user) {
-		System.out.println("Removing FpgaImages...");
+		System.out.print("Removing FpgaImages...");
 		// get id
 		DescribeFpgaImagesRequest dRequest = new DescribeFpgaImagesRequest();
 		Filter filter = new Filter();
@@ -313,16 +317,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteFpgaImageRequest request = new DeleteFpgaImageRequest();
+				System.out.print(" "+item.getFpgaImageId()+";");
 				request.withFpgaImageId(item.getFpgaImageId());
 				ec2.deleteFpgaImage(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeAddresses(AmazonEC2 ec2, ArrayList<String> vpcs, String user) {
-		System.out.println("Removing Addresses...");
+		System.out.print("Removing Addresses...");
 		// get id
 		DescribeAddressesRequest dRequest = new DescribeAddressesRequest();
 		Filter filter = new Filter();
@@ -333,12 +339,13 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 
 			try {
 				// remove by id
+				if(item.getAssociationId() != null){
 				DisassociateAddressRequest request = new DisassociateAddressRequest();
 				if (item.getPublicIp() != null)
 					request.withPublicIp(item.getPublicIp());
-				if (item.getAssociationId() != null)
-					request.withAssociationId(item.getAssociationId());
+				request.withAssociationId(item.getAssociationId());
 				ec2.disassociateAddress(request);
+				}
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
@@ -346,19 +353,21 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				ReleaseAddressRequest request = new ReleaseAddressRequest();
-				if (item.getPublicIp() != null)
-					request.withPublicIp(item.getPublicIp());
 				if (item.getAllocationId() != null)
 					request.withAllocationId(item.getAllocationId());
+				else if (item.getPublicIp() != null)
+					request.withPublicIp(item.getPublicIp());
+				System.out.print(" "+item.getAllocationId()+";");
 				ec2.releaseAddress(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeSnapshots(AmazonEC2 ec2, ArrayList<String> vpcs, String user) {
-		System.out.println("Removing Snapshots...");
+		System.out.print("Removing Snapshots...");
 		// get id
 		DescribeSnapshotsRequest dRequest = new DescribeSnapshotsRequest();
 		Filter filter = new Filter();
@@ -370,16 +379,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteSnapshotRequest request = new DeleteSnapshotRequest();
+				System.out.print(" "+item.getSnapshotId()+";");
 				request.withSnapshotId(item.getSnapshotId());
 				ec2.deleteSnapshot(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeVolumes(AmazonEC2 ec2, ArrayList<String> vpcs, String user) {
-		System.out.println("Removing Volumes...");
+		System.out.print("Removing Volumes...");
 		// get id
 		try {
 			DescribeVolumesRequest dRequest = new DescribeVolumesRequest();
@@ -392,6 +403,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 				try {
 					// remove by id
 					DeleteVolumeRequest request = new DeleteVolumeRequest();
+					System.out.print(" "+item.getVolumeId()+";");
 					request.withVolumeId(item.getVolumeId());
 					ec2.deleteVolume(request);
 				} catch (Exception e) {
@@ -401,10 +413,11 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 		} catch (Exception e) {
 			System.out.println(e.getMessage());
 		}
+		System.out.println();
 	}
 
 	void removeDhcpOptions(AmazonEC2 ec2, ArrayList<String> vpcs, String user) {
-		System.out.println("Removing DhcpOptions...");
+		System.out.print("Removing DhcpOptions...");
 		// get id
 		DescribeDhcpOptionsRequest dRequest = new DescribeDhcpOptionsRequest();
 		Filter filter = new Filter();
@@ -416,16 +429,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteDhcpOptionsRequest request = new DeleteDhcpOptionsRequest();
+				System.out.print(" "+item.getDhcpOptionsId()+";");
 				request.withDhcpOptionsId(item.getDhcpOptionsId());
 				ec2.deleteDhcpOptions(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeImages(AmazonEC2 ec2, ArrayList<String> vpcs, String user) {
-		System.out.println("Removing Images...");
+		System.out.print("Removing Images...");
 		// get id
 		DescribeImagesRequest dRequest = new DescribeImagesRequest();
 		Filter filter = new Filter();
@@ -437,16 +452,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeregisterImageRequest request = new DeregisterImageRequest();
+				System.out.println(" "+item.getImageId()+";");
 				request.withImageId(item.getImageId());
 				ec2.deregisterImage(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeNetworkInterfaces(AmazonEC2 ec2, ArrayList<String> vpcs) {
-		System.out.println("Removing NetworkInterfaces...");
+		System.out.print("Removing NetworkInterfaces...");
 		// get id
 		DescribeNetworkInterfacesRequest dRequest = new DescribeNetworkInterfacesRequest();
 		Filter filter = new Filter();
@@ -458,16 +475,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteNetworkInterfaceRequest request = new DeleteNetworkInterfaceRequest();
+				System.out.print(" "+item.getNetworkInterfaceId()+";");
 				request.withNetworkInterfaceId(item.getNetworkInterfaceId());
 				ec2.deleteNetworkInterface(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeNetworkInterfaces(AmazonEC2 ec2, String user) {
-		System.out.println("Removing NetworkInterfaces...");
+		System.out.print("Removing NetworkInterfaces by tag...");
 		// get id
 		DescribeNetworkInterfacesRequest dRequest = new DescribeNetworkInterfacesRequest();
 		Filter filter = new Filter();
@@ -479,16 +498,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteNetworkInterfaceRequest request = new DeleteNetworkInterfaceRequest();
+				System.out.print(" "+item.getNetworkInterfaceId()+";");
 				request.withNetworkInterfaceId(item.getNetworkInterfaceId());
 				ec2.deleteNetworkInterface(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeLaunchTemplates(AmazonEC2 ec2, ArrayList<String> vpcs) {
-		System.out.println("Removing LaunchTemplates...");
+		System.out.print("Removing LaunchTemplates...");
 		// get id
 		DescribeLaunchTemplatesRequest dRequest = new DescribeLaunchTemplatesRequest();
 		Filter filter = new Filter();
@@ -500,16 +521,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteLaunchTemplateRequest request = new DeleteLaunchTemplateRequest();
+				System.out.print(" "+item.getLaunchTemplateId()+";");
 				request.withLaunchTemplateId(item.getLaunchTemplateId());
 				ec2.deleteLaunchTemplate(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 	
 	void removeLaunchTemplates(AmazonEC2 ec2, String user) {
-		System.out.println("Removing LaunchTemplates...");
+		System.out.print("Removing LaunchTemplates by tag...");
 		// get id
 		DescribeLaunchTemplatesRequest dRequest = new DescribeLaunchTemplatesRequest();
 		Filter filter = new Filter();
@@ -521,16 +544,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteLaunchTemplateRequest request = new DeleteLaunchTemplateRequest();
+				System.out.print(" "+item.getLaunchTemplateId()+";");
 				request.withLaunchTemplateId(item.getLaunchTemplateId());
 				ec2.deleteLaunchTemplate(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeSpotInstanceRequests(AmazonEC2 ec2, ArrayList<String> vpcs, String user) {
-		System.out.println("Removing SpotInstanceRequests...");
+		System.out.print("Removing SpotInstanceRequests...");
 		// get id
 		DescribeSpotInstanceRequestsRequest dRequest = new DescribeSpotInstanceRequestsRequest();
 		Filter filter = new Filter();
@@ -542,16 +567,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				CancelSpotInstanceRequestsRequest request = new CancelSpotInstanceRequestsRequest();
+				System.out.print(" "+item.getSpotInstanceRequestId()+";");
 				request.withSpotInstanceRequestIds(item.getSpotInstanceRequestId());
 				ec2.cancelSpotInstanceRequests(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeBundleTasks(AmazonEC2 ec2, ArrayList<String> vpcs, String user) {
-		System.out.println("Removing BundleTasks...");
+		System.out.print("Removing BundleTasks...");
 		// get id
 		DescribeBundleTasksRequest dRequest = new DescribeBundleTasksRequest();
 		Filter filter = new Filter();
@@ -563,16 +590,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				CancelBundleTaskRequest request = new CancelBundleTaskRequest();
+				System.out.print(" "+item.getBundleId()+";");
 				request.withBundleId(item.getBundleId());
 				ec2.cancelBundleTask(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeRoutes(AmazonEC2 ec2, ArrayList<String> vpcs) {
-		System.out.println("Removing Routes...");
+		System.out.print("Removing Routes...");
 		// get id
 		DescribeRouteTablesRequest dRequest = new DescribeRouteTablesRequest();
 		Filter filter = new Filter();
@@ -608,16 +637,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteRouteTableRequest request = new DeleteRouteTableRequest();
+				System.out.print(" "+item.getRouteTableId()+";");
 				request.withRouteTableId(item.getRouteTableId());
 				ec2.deleteRouteTable(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeRoutes(AmazonEC2 ec2, String user) {
-		System.out.println("Removing Routes...");
+		System.out.print("Removing Routes by tag...");
 		// get id
 		DescribeRouteTablesRequest dRequest = new DescribeRouteTablesRequest();
 		Filter filter = new Filter();
@@ -653,16 +684,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteRouteTableRequest request = new DeleteRouteTableRequest();
+				System.out.print(" "+item.getRouteTableId()+";");
 				request.withRouteTableId(item.getRouteTableId());
 				ec2.deleteRouteTable(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeSecurityGroups(AmazonEC2 ec2, ArrayList<String> vpcs) {
-		System.out.println("Removing SecurityGroups...");
+		System.out.print("Removing SecurityGroups...");
 		// get id
 		DescribeSecurityGroupsRequest dRequest = new DescribeSecurityGroupsRequest();
 		Filter filter = new Filter();
@@ -692,16 +725,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteSecurityGroupRequest request = new DeleteSecurityGroupRequest();
+				System.out.print(" "+item.getGroupId()+";");
 				request.withGroupId(item.getGroupId());
 				ec2.deleteSecurityGroup(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeSecurityGroups(AmazonEC2 ec2, String user) {
-		System.out.println("Removing SecurityGroups...");
+		System.out.print("Removing SecurityGroups by tag...");
 		// get id
 		DescribeSecurityGroupsRequest dRequest = new DescribeSecurityGroupsRequest();
 		Filter filter = new Filter();
@@ -731,16 +766,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteSecurityGroupRequest request = new DeleteSecurityGroupRequest();
+				System.out.print(" "+item.getGroupId()+";");
 				request.withGroupId(item.getGroupId());
 				ec2.deleteSecurityGroup(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeVpcPeeringConnections(AmazonEC2 ec2, ArrayList<String> vpcs) {
-		System.out.println("Removing VpcPeeringConnections...");
+		System.out.print("Removing VpcPeeringConnections...");
 		// get id
 		DescribeVpcPeeringConnectionsRequest dRequest = new DescribeVpcPeeringConnectionsRequest();
 		Filter filter = new Filter();
@@ -752,6 +789,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteVpcPeeringConnectionRequest request = new DeleteVpcPeeringConnectionRequest();
+				System.out.print(" "+item.getVpcPeeringConnectionId()+";");
 				request.withVpcPeeringConnectionId(item.getVpcPeeringConnectionId());
 				ec2.deleteVpcPeeringConnection(request);
 			} catch (Exception e) {
@@ -768,16 +806,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteVpcPeeringConnectionRequest request = new DeleteVpcPeeringConnectionRequest();
+				System.out.print(" "+item.getVpcPeeringConnectionId()+";");
 				request.withVpcPeeringConnectionId(item.getVpcPeeringConnectionId());
 				ec2.deleteVpcPeeringConnection(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeVpcPeeringConnections(AmazonEC2 ec2, String user) {
-		System.out.println("Removing VpcPeeringConnections...");
+		System.out.print("Removing VpcPeeringConnections by tag...");
 		// get id
 		DescribeVpcPeeringConnectionsRequest dRequest = new DescribeVpcPeeringConnectionsRequest();
 		Filter filter = new Filter();
@@ -789,16 +829,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteVpcPeeringConnectionRequest request = new DeleteVpcPeeringConnectionRequest();
+				System.out.print(" "+item.getVpcPeeringConnectionId()+";");
 				request.withVpcPeeringConnectionId(item.getVpcPeeringConnectionId());
 				ec2.deleteVpcPeeringConnection(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeVpcEndpoints(AmazonEC2 ec2, ArrayList<String> vpcs) {
-		System.out.println("Removing VpcEndpoints...");
+		System.out.print("Removing VpcEndpoints...");
 		// get id
 		DescribeVpcEndpointsRequest dRequest = new DescribeVpcEndpointsRequest();
 		Filter filter = new Filter();
@@ -810,6 +852,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteVpcEndpointsRequest request = new DeleteVpcEndpointsRequest();
+				System.out.print(" "+item.getVpcEndpointId()+";");
 				request.withVpcEndpointIds(item.getVpcEndpointId());
 				ec2.deleteVpcEndpoints(request);
 			} catch (Exception e) {
@@ -827,16 +870,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteVpcEndpointsRequest request = new DeleteVpcEndpointsRequest();
+				System.out.print(" "+item.getVpcEndpointId()+";");
 				request.withVpcEndpointIds(item.getVpcEndpointId());
 				ec2.deleteVpcEndpoints(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeInternetGateways(AmazonEC2 ec2, ArrayList<String> vpcs) {
-		System.out.println("Removing InternetGateways...");
+		System.out.print("Removing InternetGateways...");
 		// get id
 		DescribeInternetGatewaysRequest dRequest = new DescribeInternetGatewaysRequest();
 		Filter filter = new Filter();
@@ -847,9 +892,9 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			for (InternetGatewayAttachment vpcAtt : item.getAttachments()) {
 				try {
 					// remove by id
-					DetachVpnGatewayRequest detRequest = new DetachVpnGatewayRequest();
-					detRequest.withVpnGatewayId(item.getInternetGatewayId()).withVpcId(vpcAtt.getVpcId());
-					ec2.detachVpnGateway(detRequest);
+					DetachInternetGatewayRequest detRequest = new DetachInternetGatewayRequest();
+					detRequest.withInternetGatewayId(item.getInternetGatewayId()).withVpcId(vpcAtt.getVpcId());
+					ec2.detachInternetGateway(detRequest);
 				} catch (Exception e) {
 					System.out.println(e.getMessage());
 				}
@@ -857,16 +902,50 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteInternetGatewayRequest request = new DeleteInternetGatewayRequest();
+				System.out.print(" "+item.getInternetGatewayId()+";");
 				request.withInternetGatewayId(item.getInternetGatewayId());
 				ec2.deleteInternetGateway(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
+	}
+	
+	void removeInternetGateways(AmazonEC2 ec2, String user) {
+		System.out.print("Removing InternetGateways by tag...");
+		// get id
+		DescribeInternetGatewaysRequest dRequest = new DescribeInternetGatewaysRequest();
+		Filter filter = new Filter();
+		filter.withName("tag:Owner").withValues(user);
+		dRequest.withFilters(filter);
+		DescribeInternetGatewaysResult dResult = ec2.describeInternetGateways(dRequest);
+		for (InternetGateway item : dResult.getInternetGateways()) {
+			for (InternetGatewayAttachment vpcAtt : item.getAttachments()) {
+				try {
+					// remove by id
+					DetachInternetGatewayRequest detRequest = new DetachInternetGatewayRequest();
+					detRequest.withInternetGatewayId(item.getInternetGatewayId()).withVpcId(vpcAtt.getVpcId());
+					ec2.detachInternetGateway(detRequest);
+				} catch (Exception e) {
+					System.out.println(e.getMessage());
+				}
+			}
+			try {
+				// remove by id
+				DeleteInternetGatewayRequest request = new DeleteInternetGatewayRequest();
+				System.out.print(" "+item.getInternetGatewayId()+";");
+				request.withInternetGatewayId(item.getInternetGatewayId());
+				ec2.deleteInternetGateway(request);
+			} catch (Exception e) {
+				System.out.println(e.getMessage());
+			}
+		}
+		System.out.println();
 	}
 
 	void removeCustomerGateways(AmazonEC2 ec2, String user) {
-		System.out.println("Removing CustomerGateways by Tag...");
+		System.out.print("Removing CustomerGateways by Tag...");
 		// get id
 		DescribeCustomerGatewaysRequest dRequest = new DescribeCustomerGatewaysRequest();
 		Filter filter = new Filter();
@@ -877,34 +956,38 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteCustomerGatewayRequest request = new DeleteCustomerGatewayRequest();
+				System.out.print(" "+item.getCustomerGatewayId()+";");
 				request.withCustomerGatewayId(item.getCustomerGatewayId());
 				ec2.deleteCustomerGateway(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeCustomerGateways(AmazonEC2 ec2, ArrayList<String> gateways) {
-		System.out.println("Removing CustomerGateways...");
+		System.out.print("Removing CustomerGateways...");
 		for (String item : gateways) {
 			try {
 				// remove by id
 				DeleteCustomerGatewayRequest request = new DeleteCustomerGatewayRequest();
+				System.out.print(" "+item+";");
 				request.withCustomerGatewayId(item);
 				ec2.deleteCustomerGateway(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
-	void removeVpnConnections(AmazonEC2 ec2, ArrayList<String> vpcs) {
-		System.out.println("Removing VpnConnections...");
+	void removeVpnConnections(AmazonEC2 ec2, ArrayList<String> vpnGateways) {
+		System.out.print("Removing VpnConnections...");
 		// get id
 		DescribeVpnConnectionsRequest dRequest = new DescribeVpnConnectionsRequest();
 		Filter filter = new Filter();
-		filter.withName("vpc-id").withValues(vpcs);
+		filter.withName("vpn-gateway-id").withValues(vpnGateways);
 		dRequest.withFilters(filter);
 		DescribeVpnConnectionsResult dResult = ec2.describeVpnConnections(dRequest);
 		ArrayList<String> gateways = new ArrayList<String>();
@@ -913,19 +996,21 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteVpnConnectionRequest request = new DeleteVpnConnectionRequest();
+				System.out.print(" "+item.getVpnConnectionId()+";");
 				request.withVpnConnectionId(item.getVpnConnectionId());
 				ec2.deleteVpnConnection(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 
 		// call remove CustomerGateways
 		removeCustomerGateways(ec2, gateways);
 	}
 
 	void removeVpnConnections(AmazonEC2 ec2, String user) {
-		System.out.println("Removing VpnConnections...");
+		System.out.print("Removing VpnConnections by tag...");
 		// get id
 		DescribeVpnConnectionsRequest dRequest = new DescribeVpnConnectionsRequest();
 		Filter filter = new Filter();
@@ -938,19 +1023,21 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteVpnConnectionRequest request = new DeleteVpnConnectionRequest();
+				System.out.print(" "+item.getVpnConnectionId()+";");
 				request.withVpnConnectionId(item.getVpnConnectionId());
 				ec2.deleteVpnConnection(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 
 		// call remove CustomerGateways
 		removeCustomerGateways(ec2, gateways);
 	}
 
 	void removeNetworkAcls(AmazonEC2 ec2, ArrayList<String> vpcs) {
-		System.out.println("Removing NetworkAcls...");
+		System.out.print("Removing NetworkAcls...");
 		// get id
 		DescribeNetworkAclsRequest dRequest = new DescribeNetworkAclsRequest();
 		Filter filter = new Filter();
@@ -962,16 +1049,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteNetworkAclRequest request = new DeleteNetworkAclRequest();
+				System.out.print(" "+item.getNetworkAclId()+";");
 				request.withNetworkAclId(item.getNetworkAclId());
 				ec2.deleteNetworkAcl(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 	
 	void removeNetworkAcls(AmazonEC2 ec2, String user) {
-		System.out.println("Removing NetworkAcls...");
+		System.out.print("Removing NetworkAcls by tag...");
 		// get id
 		DescribeNetworkAclsRequest dRequest = new DescribeNetworkAclsRequest();
 		Filter filter = new Filter();
@@ -983,16 +1072,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteNetworkAclRequest request = new DeleteNetworkAclRequest();
+				System.out.print(" "+item.getNetworkAclId()+";");
 				request.withNetworkAclId(item.getNetworkAclId());
 				ec2.deleteNetworkAcl(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeSubnets(AmazonEC2 ec2, ArrayList<String> vpcs) {
-		System.out.println("Removing Subnets...");
+		System.out.print("Removing Subnets...");
 		// get id
 		DescribeSubnetsRequest dRequest = new DescribeSubnetsRequest();
 		Filter filter = new Filter();
@@ -1004,16 +1095,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteSubnetRequest request = new DeleteSubnetRequest();
+				System.out.print(" "+item.getSubnetId()+";");
 				request.withSubnetId(item.getSubnetId());
 				ec2.deleteSubnet(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	void removeSubnets(AmazonEC2 ec2, String user) {
-		System.out.println("Removing Subnets...");
+		System.out.print("Removing Subnets by tag...");
 		// get id
 		DescribeSubnetsRequest dRequest = new DescribeSubnetsRequest();
 		Filter filter = new Filter();
@@ -1025,12 +1118,14 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteSubnetRequest request = new DeleteSubnetRequest();
+				System.out.print(" "+item.getSubnetId()+";");
 				request.withSubnetId(item.getSubnetId());
 				ec2.deleteSubnet(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
 	}
 
 	boolean removeVpcs(AmazonEC2 ec2, ArrayList<String> vpcs) {
@@ -1052,8 +1147,9 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 	}
 
 	void removeVpnGateways(AmazonEC2 ec2, ArrayList<String> vpcs) {
-		System.out.println("Removing VpnGateways...");
+		System.out.print("Removing VpnGateways...");
 		// get id
+		ArrayList<String> gateways = new ArrayList<String>();
 		DescribeVpnGatewaysRequest dRequest = new DescribeVpnGatewaysRequest();
 		Filter filter = new Filter();
 		filter.withName("attachment.vpc-id").withValues(vpcs);
@@ -1065,6 +1161,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 					// remove by id
 					DetachVpnGatewayRequest detRequest = new DetachVpnGatewayRequest();
 					detRequest.withVpnGatewayId(item.getVpnGatewayId()).withVpcId(vpcAtt.getVpcId());
+					gateways.add(item.getVpnGatewayId());
 					ec2.detachVpnGateway(detRequest);
 				} catch (Exception e) {
 					System.out.println(e.getMessage());
@@ -1073,17 +1170,21 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 
 			try {
 				DeleteVpnGatewayRequest request = new DeleteVpnGatewayRequest();
+				System.out.print(" "+item.getVpnGatewayId()+";");
 				request.withVpnGatewayId(item.getVpnGatewayId());
 				ec2.deleteVpnGateway(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
+		removeVpnConnections(ec2, gateways);
 	}
 
 	void removeVpnGateways(AmazonEC2 ec2, String user) {
-		System.out.println("Removing VpnGateways...");
+		System.out.print("Removing VpnGateways by tag...");
 		// get id
+		ArrayList<String> gateways = new ArrayList<String>();
 		DescribeVpnGatewaysRequest dRequest = new DescribeVpnGatewaysRequest();
 		Filter filter = new Filter();
 		filter.withName("tag:Owner").withValues(user);
@@ -1094,6 +1195,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 				try {
 					// remove by id
 					DetachVpnGatewayRequest detRequest = new DetachVpnGatewayRequest();
+					gateways.add(item.getVpnGatewayId());
 					detRequest.withVpnGatewayId(item.getVpnGatewayId()).withVpcId(vpcAtt.getVpcId());
 					ec2.detachVpnGateway(detRequest);
 				} catch (Exception e) {
@@ -1103,16 +1205,19 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 
 			try {
 				DeleteVpnGatewayRequest request = new DeleteVpnGatewayRequest();
+				System.out.print(" "+item.getVpnGatewayId()+";");
 				request.withVpnGatewayId(item.getVpnGatewayId());
 				ec2.deleteVpnGateway(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 		}
+		System.out.println();
+		removeVpnConnections(ec2, gateways);
 	}
 
 	void removeEgressOnlyInternetGateways(AmazonEC2 ec2, ArrayList<String> vpcs) {
-		System.out.println("Removing EgressOnlyInternetGateways...");
+		System.out.print("Removing EgressOnlyInternetGateways...");
 		// get id
 		DescribeEgressOnlyInternetGatewaysResult dResult = ec2
 				.describeEgressOnlyInternetGateways(new DescribeEgressOnlyInternetGatewaysRequest());
@@ -1122,6 +1227,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 					try {
 						// remove by id
 						DeleteEgressOnlyInternetGatewayRequest request = new DeleteEgressOnlyInternetGatewayRequest();
+						System.out.print(" "+item.getEgressOnlyInternetGatewayId()+";");
 						request.withEgressOnlyInternetGatewayId(item.getEgressOnlyInternetGatewayId());
 						ec2.deleteEgressOnlyInternetGateway(request);
 					} catch (Exception e) {
@@ -1131,6 +1237,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 				}
 			}
 		}
+		System.out.println();
 	}
 
 	boolean arrayContains(ArrayList<String> list, String value) {
@@ -1142,26 +1249,30 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 	}
 
 	void deleteUserData(AmazonDynamoDB db, String userTable, String resourceTable, String region, String user) {
-		System.out.println("Deleting user resources...");
+		System.out.print("Deleting user resources...");
 		// scan user resources
+		HashMap<String, String> keys = new HashMap<String, String>();
+		keys.put("#U", "User");
 		HashMap<String, AttributeValue> values = new HashMap<String, AttributeValue>();
-		values.put(":user", (new AttributeValue()).withN((new Date()).getTime() + ""));
+		values.put(":user", (new AttributeValue()).withS(user));
 		values.put(":r", (new AttributeValue()).withS(region));
-		ScanRequest request = new ScanRequest().withTableName(resourceTable).withFilterExpression("User = :r")
-				.withExpressionAttributeValues(values);
+		ScanRequest request = new ScanRequest().withTableName(resourceTable).withFilterExpression("#U = :user AND ResourceRegion = :r")
+				.withExpressionAttributeValues(values).withExpressionAttributeNames(keys);
 		ScanResult response = db.scan(request);
 		for (Map<String, AttributeValue> item : response.getItems()) {
 
 			// remove user resources
 			try {
 				DeleteItemRequest dRequest = new DeleteItemRequest();
-				dRequest.withTableName(resourceTable).addKeyEntry("ResourceId", item.get("ResourceId"));
+				System.out.print(" "+item.get("ResourceId").getS()+";");
+				dRequest.withTableName(resourceTable).addKeyEntry("ResourceId", item.get("ResourceId")).addKeyEntry("ResourceRegion", item.get("ResourceRegion"));
 				db.deleteItem(dRequest);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
 
 		}
+		System.out.println();
 	}
 
 	void deactivateUser(AmazonDynamoDB db, String userTable, String resourceTable, ArrayList<String> users) {

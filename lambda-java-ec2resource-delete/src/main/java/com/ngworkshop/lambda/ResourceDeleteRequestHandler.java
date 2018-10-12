@@ -4,10 +4,21 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 
+import com.amazonaws.services.autoscaling.AmazonAutoScaling;
+import com.amazonaws.services.autoscaling.AmazonAutoScalingClientBuilder;
+import com.amazonaws.services.autoscaling.model.AutoScalingGroup;
+import com.amazonaws.services.autoscaling.model.DeleteAutoScalingGroupRequest;
+import com.amazonaws.services.autoscaling.model.DeleteLaunchConfigurationRequest;
+import com.amazonaws.services.autoscaling.model.DescribeAutoScalingGroupsRequest;
+import com.amazonaws.services.autoscaling.model.DescribeAutoScalingGroupsResult;
+import com.amazonaws.services.autoscaling.model.DescribeLoadBalancersRequest;
+import com.amazonaws.services.autoscaling.model.DescribeLoadBalancersResult;
+import com.amazonaws.services.autoscaling.model.LoadBalancerState;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDB;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClientBuilder;
 import com.amazonaws.services.dynamodbv2.model.AttributeValue;
@@ -15,10 +26,15 @@ import com.amazonaws.services.dynamodbv2.model.DeleteItemRequest;
 import com.amazonaws.services.dynamodbv2.model.ScanRequest;
 import com.amazonaws.services.dynamodbv2.model.ScanResult;
 import com.amazonaws.services.dynamodbv2.model.UpdateItemRequest;
-import com.amazonaws.services.dynamodbv2.model.UpdateItemResult;
 import com.amazonaws.services.ec2.AmazonEC2;
 import com.amazonaws.services.ec2.AmazonEC2ClientBuilder;
 import com.amazonaws.services.ec2.model.*;
+import com.amazonaws.services.elasticloadbalancingv2.AmazonElasticLoadBalancing;
+import com.amazonaws.services.elasticloadbalancingv2.AmazonElasticLoadBalancingClientBuilder;
+import com.amazonaws.services.elasticloadbalancingv2.model.DeleteLoadBalancerRequest;
+import com.amazonaws.services.elasticloadbalancingv2.model.DeleteTargetGroupRequest;
+import com.amazonaws.services.elasticloadbalancingv2.model.LoadBalancer;
+import com.amazonaws.services.elasticloadbalancingv2.model.Tag;
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestStreamHandler;
 
@@ -67,6 +83,8 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 		// Create the AmazonEC2 client so we can call various APIs.
 		System.out.println("Start Resource deletion...");
 		AmazonEC2 ec2 = AmazonEC2ClientBuilder.defaultClient();
+		AmazonAutoScaling as;
+		AmazonElasticLoadBalancing elb;
 		AmazonDynamoDB db = AmazonDynamoDBClientBuilder.standard().build();
 
 		boolean useTrail = System.getenv("USE_TRAIL") != null
@@ -74,98 +92,266 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 		String region = System.getenv("REGION");
 		String userTable = System.getenv("USER_TABLE");
 		String resourceTable = System.getenv("RESOURCE_TABLE");
-		ArrayList<String> users = new ArrayList<String>();
-		if (region != null) {
-			ec2 = AmazonEC2ClientBuilder.standard().withRegion(region).build();
-			handleRequestInRegion(ec2, db, userTable, resourceTable, useTrail, region, users);
-		} else {
-			DescribeRegionsResult result = ec2.describeRegions();
-			for (Region item : result.getRegions()) {
-				ec2 = AmazonEC2ClientBuilder.standard().withRegion(item.getRegionName()).build();
-				handleRequestInRegion(ec2, db, userTable, resourceTable, useTrail, item.getRegionName(), users);
+		String[] regions = { "us-east-1", "us-east-2", "us-west-2", "us-west-1", "ca-central-1", "eu-central-1",
+				"eu-west-1", "eu-west-2", "eu-west-3", "sa-east-1", "ap-northeast-1", "ap-northeast-2", "ap-south-1",
+				"ap-southeast-1", "ap-southeast-2" };
+		Object[] extraData = new Object[1];
+		String user = getExpiredUsers(db, userTable, regions, extraData);
+		while (user != null) {
+			boolean canDeactivate = true;
+			if (region != null) {
+				ec2 = AmazonEC2ClientBuilder.standard().withRegion(region).build();
+				as = AmazonAutoScalingClientBuilder.standard().withRegion(region).build();
+				elb = AmazonElasticLoadBalancingClientBuilder.standard().withRegion(region).build();
+				canDeactivate = canDeactivate && handleRequestInRegion(ec2, as, elb, db, userTable, resourceTable, useTrail, region, user);
+			} else {
+				for (int i = 0; i < regions.length; i++) {
+					if (regions[i] != null) {
+						String item = regions[i];
+						ec2 = AmazonEC2ClientBuilder.standard().withRegion(item).build();
+						as = AmazonAutoScalingClientBuilder.standard().withRegion(item).build();
+						elb = AmazonElasticLoadBalancingClientBuilder.standard().withRegion(item).build();
+						if (handleRequestInRegion(ec2, as, elb, db, userTable, resourceTable, useTrail, item, user)) {
+							regions[i] = null;
+						} else {
+							canDeactivate = false;
+						}
+						updateProcessedRegions(db, userTable, getProcessedRegionsMask(regions), user);
+					}
+				}
 			}
-			deactivateUser(db, userTable, resourceTable, users);
+			if (canDeactivate)
+				deactivateUser(db, userTable, resourceTable, user);
+			else
+				setUserRetry(db, userTable, (int)extraData[0], user);
+			String[] refreshRegions = { "us-east-1", "us-east-2", "us-west-2", "us-west-1", "ca-central-1", "eu-central-1",
+					"eu-west-1", "eu-west-2", "eu-west-3", "sa-east-1", "ap-northeast-1", "ap-northeast-2", "ap-south-1",
+					"ap-southeast-1", "ap-southeast-2" };
+			regions = refreshRegions;	
+			user = getExpiredUsers(db, userTable, regions, extraData);
 		}
 
 	}
 
-	void handleRequestInRegion(AmazonEC2 ec2, AmazonDynamoDB db, String userTable, String resourceTable,
-			boolean useTrail, String region, ArrayList<String> usersToDeactivate) {
+	boolean handleRequestInRegion(AmazonEC2 ec2, AmazonAutoScaling as, AmazonElasticLoadBalancing elb,
+			AmazonDynamoDB db, String userTable, String resourceTable, boolean useTrail, String region, String user) {
 		System.out.println("Invoking function in " + region + " region.");
-		ArrayList<String> users = getExpiredUsers(db, userTable, region);
-		if (System.getenv("TEST_USER") != null) {
-			users.add(System.getenv("TEST_USER"));
-		}
 		ArrayList<String> vpcs = new ArrayList<String>();
 		ArrayList<String> instances = new ArrayList<String>();
 		ArrayList<String> keys = new ArrayList<String>();
-		System.out.println("Users: " + String.join(",", users));
-		for (String user : users) {
-			if (useTrail) {
-				scanCloudTrail(ec2, userTable, user, vpcs, instances);
-			} else {
-				getVpcsByTag(ec2, user, vpcs);
-				System.out.println("Vpcs: " + String.join(",", vpcs));
-				getInstancesByTag(ec2, user, instances, keys);
-				getInstancesInVpcs(ec2, vpcs, instances, keys);
-				System.out.println("Instances: " + String.join(",", instances));
-				terminateInstances(ec2, instances);
-				removeKeys(ec2, keys);
-				removeNatGateways(ec2, vpcs);
-				removeNatGateways(ec2, user);
-				removeVpcEndpoints(ec2, vpcs);
-				removeVpcPeeringConnections(ec2, vpcs);
-				removeVpcPeeringConnections(ec2, user);
-				removeRoutes(ec2, vpcs);
-				removeRoutes(ec2, user);
-				removeSubnets(ec2, vpcs);
-				removeSubnets(ec2, user);
-				removeInternetGateways(ec2, vpcs);
-				removeInternetGateways(ec2, user);
-				removeCustomerGateways(ec2, user);
-				removeEgressOnlyInternetGateways(ec2, vpcs);
-				removeVpnGateways(ec2, vpcs);
-				removeVpnGateways(ec2, user);
-				removeVpnConnections(ec2, user);
-				removeSecurityGroups(ec2, vpcs);
-				removeSecurityGroups(ec2, user);
-				removeNetworkAcls(ec2, vpcs);
-				removeNetworkAcls(ec2, user);
-				removeNetworkInterfaces(ec2, vpcs);
-				removeNetworkInterfaces(ec2, user);
-				if (removeVpcs(ec2, vpcs))
-					usersToDeactivate.add(user);
+		boolean canDeactivate = true;
+		System.out.println("User: " + user);
+		if (useTrail) {
+			scanCloudTrail(ec2, userTable, user, vpcs, instances);
+		} else {
+			removeAutoScalingGroups(as, user);
 
-				removeFpgaImages(ec2, vpcs, user);
-				removeImages(ec2, vpcs, user);
-				//removeBundleTasks(ec2, vpcs, user);
-				removeDhcpOptions(ec2, vpcs, user);
-				removeVolumes(ec2, vpcs, user);
-				removeSnapshots(ec2, vpcs, user);
-				removeAddresses(ec2, vpcs, user);
-				//removeLaunchTemplates(ec2, vpcs);
-				removeLaunchTemplates(ec2, user);
-				removeSpotInstanceRequests(ec2, vpcs, user);
+			getVpcsByTag(ec2, user, vpcs);
+			System.out.println("Vpcs: " + String.join(",", vpcs));
+			getInstancesByTag(ec2, user, instances, keys);
+			getInstancesInVpcs(ec2, vpcs, instances, keys);
+			System.out.println("Instances: " + String.join(",", instances));
+			terminateInstances(ec2, instances);
+			// removeScheduledInstances(ec2, vpcs, user);
+			removeKeys(ec2, keys);
+			removeNatGateways(ec2, vpcs);
+			removeNatGateways(ec2, user);
+			removeVpcEndpoints(ec2, vpcs);
+			removeVpcPeeringConnections(ec2, vpcs);
+			removeVpcPeeringConnections(ec2, user);
+			removeRoutes(ec2, vpcs);
+			removeRoutes(ec2, user);
+			removeSubnets(ec2, vpcs);
+			removeSubnets(ec2, user);
+			removeInternetGateways(ec2, vpcs);
+			removeInternetGateways(ec2, user);
+			removeCustomerGateways(ec2, user);
+			removeEgressOnlyInternetGateways(ec2, vpcs);
+			removeVpnGateways(ec2, vpcs);
+			removeVpnGateways(ec2, user);
+			removeVpnConnections(ec2, user);
+			removeSecurityGroups(ec2, vpcs);
+			removeSecurityGroups(ec2, user);
+			removeNetworkAcls(ec2, vpcs);
+			removeNetworkAcls(ec2, user);
+			removeNetworkInterfaces(ec2, vpcs);
+			removeNetworkInterfaces(ec2, user);
+			canDeactivate = removeVpcs(ec2, vpcs);
 
+			removeFpgaImages(ec2, vpcs, user);
+			removeImages(ec2, vpcs, user);
+			removeLoadBalancers(elb, vpcs, user);
+			removeTargetGroups(elb, user);
+			// removeBundleTasks(ec2, vpcs, user);
+			removeDhcpOptions(ec2, vpcs, user);
+			removeVolumes(ec2, vpcs, user);
+			removeSnapshots(ec2, vpcs, user);
+			removeAddresses(ec2, vpcs, user);
+			// removeLaunchTemplates(ec2, vpcs);
+			removeLaunchTemplates(ec2, user);
+			// removeSpotInstanceRequests(ec2, vpcs, user);
+			removeUserKeyPairs(db, ec2, resourceTable, region, user);
+			removeLaunchConfigurations(db, as, resourceTable, region, user);
+			removePlacementGroups(db, ec2, resourceTable, region, user);
+			// removeHosts(db, ec2, resourceTable, region, user);
+
+			if (canDeactivate)
 				deleteUserData(db, userTable, resourceTable, region, user);
-			}
 		}
+		return canDeactivate;
 	}
 
-	ArrayList<String> getExpiredUsers(AmazonDynamoDB db, String table, String region) {
+	String getExpiredUsers(AmazonDynamoDB db, String table, String[] regions, Object[] extraData) {
 		HashMap<String, AttributeValue> values = new HashMap<String, AttributeValue>();
 		values.put(":end", (new AttributeValue()).withN((new Date()).getTime() + ""));
-		values.put(":r", (new AttributeValue()).withS(region));
 		values.put(":a", (new AttributeValue()).withBOOL(true));
 		ScanRequest request = new ScanRequest().withTableName(table)
-				.withFilterExpression("ExpirationDate < :end AND Active = :a AND ResourceRegion = :r")
-				.withExpressionAttributeValues(values);
+				.withFilterExpression("ExpirationDate < :end AND Active = :a").withExpressionAttributeValues(values);
 		ScanResult response = db.scan(request);
-		ArrayList<String> result = new ArrayList<String>();
+		String oldestUser = null;
+		String processedRegions = null;
+
+		long oldestDate = -1;
 		for (Map<String, AttributeValue> item : response.getItems()) {
-			result.add(item.get("Email").getS());
+			long date = new Long(item.get("ExpirationDate").getN());
+			long retryDate = item.get("NextRetryDate") == null ? -1 : new Long(item.get("NextRetryDate").getN());
+			int retryCount = item.get("RetryCount") == null ? 0 : new Integer(item.get("RetryCount").getN());
+			extraData[0] = retryCount;
+			date = date > retryDate ? date : retryDate;
+			if (oldestDate < 0 || oldestDate > date) {
+				oldestUser = item.get("Email").getS();
+				processedRegions = item.get("ProcessedRegions") == null ? null : item.get("ProcessedRegions").getS();
+				oldestDate = date;
+			}
 		}
-		return result;
+		if (oldestUser != null) {
+			if (processedRegions == null) {
+				processedRegions = "";
+				for (int i = 0; i < regions.length; i++)
+					processedRegions += "0";
+			}
+
+			for (int i = 0; i < regions.length; i++) {
+				if (processedRegions.charAt(i) == '1')
+					regions[i] = null;
+			}
+		}
+
+		return oldestUser;
+	}
+
+	String getProcessedRegionsMask(String[] regions) {
+		String processedRegions = "";
+		for (int i = 0; i < regions.length; i++)
+			if (regions[i] == null)
+				processedRegions += "1";
+			else
+				processedRegions += "0";
+		return processedRegions;
+	}
+
+	void removeUserKeyPairs(AmazonDynamoDB db, AmazonEC2 ec2, String table, String region, String user) {
+		System.out.println("Removing key pairs...");
+		HashMap<String, AttributeValue> values = new HashMap<String, AttributeValue>();
+		values.put(":r", (new AttributeValue()).withS(region));
+		values.put(":u", (new AttributeValue()).withS(user));
+		values.put(":t", (new AttributeValue()).withS("AWS::EC2::KeyPair"));
+		HashMap<String, String> keys = new HashMap<String, String>();
+		keys.put("#U", "User");
+		ScanRequest request = new ScanRequest().withTableName(table)
+				.withFilterExpression("ResourceRegion = :r AND ResourceType = :t AND #U = :u")
+				.withExpressionAttributeValues(values).withExpressionAttributeNames(keys);
+		ScanResult response = db.scan(request);
+		for (Map<String, AttributeValue> item : response.getItems()) {
+			String keyName = item.get("ResourceId").getS();
+			try {
+				DeleteKeyPairRequest request2 = new DeleteKeyPairRequest();
+				request2.withKeyName(keyName);
+				ec2.deleteKeyPair(request2);
+				System.out.println("KeyPair name=" + keyName + " end");
+			} catch (Exception e) {
+				System.out.println(e.getMessage());
+			}
+		}
+		System.out.println();
+	}
+
+	void removeHosts(AmazonDynamoDB db, AmazonEC2 ec2, String table, String region, String user) {
+		System.out.println("Removing hosts...");
+		HashMap<String, AttributeValue> values = new HashMap<String, AttributeValue>();
+		values.put(":r", (new AttributeValue()).withS(region));
+		values.put(":u", (new AttributeValue()).withS(user));
+		values.put(":t", (new AttributeValue()).withS("AWS::EC2::Host"));
+		HashMap<String, String> keys = new HashMap<String, String>();
+		keys.put("#U", "User");
+		ScanRequest request = new ScanRequest().withTableName(table)
+				.withFilterExpression("ResourceRegion = :r AND ResourceType = :t AND #U = :u")
+				.withExpressionAttributeValues(values).withExpressionAttributeNames(keys);
+		ScanResult response = db.scan(request);
+		for (Map<String, AttributeValue> item : response.getItems()) {
+			String keyName = item.get("ResourceId").getS();
+			try {
+				DeleteKeyPairRequest request2 = new DeleteKeyPairRequest();
+				request2.withKeyName(keyName);
+				ec2.deleteKeyPair(request2);
+				System.out.println("Host name=" + keyName);
+			} catch (Exception e) {
+				System.out.println(e.getMessage());
+			}
+		}
+		System.out.println();
+	}
+
+	void removeLaunchConfigurations(AmazonDynamoDB db, AmazonAutoScaling as, String table, String region, String user) {
+		System.out.println("Removing launch configurations...");
+		HashMap<String, AttributeValue> values = new HashMap<String, AttributeValue>();
+		values.put(":r", (new AttributeValue()).withS(region));
+		values.put(":u", (new AttributeValue()).withS(user));
+		values.put(":t", (new AttributeValue()).withS("AWS::AutoScaling::LaunchConfiguration"));
+		HashMap<String, String> keys = new HashMap<String, String>();
+		keys.put("#U", "User");
+		ScanRequest request = new ScanRequest().withTableName(table)
+				.withFilterExpression("ResourceRegion = :r AND ResourceType = :t AND #U = :u")
+				.withExpressionAttributeValues(values).withExpressionAttributeNames(keys);
+		ScanResult response = db.scan(request);
+		for (Map<String, AttributeValue> item : response.getItems()) {
+			String launchName = item.get("ResourceId").getS();
+			try {
+				DeleteLaunchConfigurationRequest request2 = new DeleteLaunchConfigurationRequest();
+				request2.withLaunchConfigurationName(launchName);
+				as.deleteLaunchConfiguration(request2);
+				System.out.println("LaunchConfiguration name=" + launchName);
+			} catch (Exception e) {
+				System.out.println(e.getMessage());
+			}
+		}
+		System.out.println();
+	}
+
+	void removePlacementGroups(AmazonDynamoDB db, AmazonEC2 ec2, String table, String region, String user) {
+		System.out.println("Removing launch configurations...");
+		HashMap<String, AttributeValue> values = new HashMap<String, AttributeValue>();
+		values.put(":r", (new AttributeValue()).withS(region));
+		values.put(":u", (new AttributeValue()).withS(user));
+		values.put(":t", (new AttributeValue()).withS("AWS::EC2::PlacementGroup"));
+		HashMap<String, String> keys = new HashMap<String, String>();
+		keys.put("#U", "User");
+		ScanRequest request = new ScanRequest().withTableName(table)
+				.withFilterExpression("ResourceRegion = :r AND ResourceType = :t AND #U = :u")
+				.withExpressionAttributeValues(values).withExpressionAttributeNames(keys);
+		ScanResult response = db.scan(request);
+		for (Map<String, AttributeValue> item : response.getItems()) {
+			String groupName = item.get("ResourceId").getS();
+			try {
+				DeletePlacementGroupRequest request2 = new DeletePlacementGroupRequest();
+				request2.withGroupName(groupName);
+				ec2.deletePlacementGroup(request2);
+				System.out.println("PlacementGroup name=" + groupName);
+			} catch (Exception e) {
+				System.out.println(e.getMessage());
+			}
+		}
+		System.out.println();
 	}
 
 	void scanCloudTrail(AmazonEC2 ec2, String table, String user, ArrayList<String> vpcs, ArrayList<String> instances) {
@@ -184,9 +370,9 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 				keys.add(inst.getKeyName());
 			}
 		}
-//		if (System.getenv("TEST_USER") != null) {
-//			instances.add("i-123");
-//		}
+		// if (System.getenv("TEST_USER") != null) {
+		// instances.add("i-123");
+		// }
 	}
 
 	void getInstancesInVpcs(AmazonEC2 ec2, ArrayList<String> vpcs, ArrayList<String> instances,
@@ -220,6 +406,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 	void terminateInstances(AmazonEC2 ec2, ArrayList<String> ids) {
 		System.out.println("Terminating instances...");
 		for (String id : ids) {
+			disableInstanceLock(ec2, id);
 			terminateInstance(ec2, id);
 		}
 	}
@@ -254,6 +441,17 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 
 	}
 
+	void disableInstanceLock(AmazonEC2 ec2, String id) {
+		try {
+			ModifyInstanceAttributeRequest request = new ModifyInstanceAttributeRequest();
+			request.withInstanceId(id).withDisableApiTermination(false);
+			ec2.modifyInstanceAttribute(request);
+		} catch (Exception e) {
+			System.out.println(e.getMessage());
+		}
+
+	}
+
 	void removeElastics(AmazonEC2 ec2, ArrayList<String> instances) {
 
 	}
@@ -271,7 +469,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteNatGatewayRequest request = new DeleteNatGatewayRequest();
-				System.out.print(" "+item.getNatGatewayId()+";");
+				System.out.print(" " + item.getNatGatewayId() + ";");
 				request.withNatGatewayId(item.getNatGatewayId());
 				ec2.deleteNatGateway(request);
 			} catch (Exception e) {
@@ -280,7 +478,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 		}
 		System.out.println();
 	}
-	
+
 	void removeNatGateways(AmazonEC2 ec2, String user) {
 		System.out.print("Removing NatGateways by tag...");
 		// get id
@@ -294,7 +492,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteNatGatewayRequest request = new DeleteNatGatewayRequest();
-				System.out.print(" "+item.getNatGatewayId()+";");
+				System.out.print(" " + item.getNatGatewayId() + ";");
 				request.withNatGatewayId(item.getNatGatewayId());
 				ec2.deleteNatGateway(request);
 			} catch (Exception e) {
@@ -307,22 +505,26 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 	void removeFpgaImages(AmazonEC2 ec2, ArrayList<String> vpcs, String user) {
 		System.out.print("Removing FpgaImages...");
 		// get id
-		DescribeFpgaImagesRequest dRequest = new DescribeFpgaImagesRequest();
-		Filter filter = new Filter();
-		filter.withName("tag:Owner").withValues(user);
-		dRequest.withFilters(filter);
-		DescribeFpgaImagesResult dResult = ec2.describeFpgaImages(dRequest);
-		for (FpgaImage item : dResult.getFpgaImages()) {
+		try {
+			DescribeFpgaImagesRequest dRequest = new DescribeFpgaImagesRequest();
+			Filter filter = new Filter();
+			filter.withName("tag:Owner").withValues(user);
+			dRequest.withFilters(filter);
+			DescribeFpgaImagesResult dResult = ec2.describeFpgaImages(dRequest);
+			for (FpgaImage item : dResult.getFpgaImages()) {
 
-			try {
-				// remove by id
-				DeleteFpgaImageRequest request = new DeleteFpgaImageRequest();
-				System.out.print(" "+item.getFpgaImageId()+";");
-				request.withFpgaImageId(item.getFpgaImageId());
-				ec2.deleteFpgaImage(request);
-			} catch (Exception e) {
-				System.out.println(e.getMessage());
+				try {
+					// remove by id
+					DeleteFpgaImageRequest request = new DeleteFpgaImageRequest();
+					System.out.print(" " + item.getFpgaImageId() + ";");
+					request.withFpgaImageId(item.getFpgaImageId());
+					ec2.deleteFpgaImage(request);
+				} catch (Exception e) {
+					System.out.println(e.getMessage());
+				}
 			}
+		} catch (Exception e) {
+			System.out.println(e.getMessage());
 		}
 		System.out.println();
 	}
@@ -339,12 +541,12 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 
 			try {
 				// remove by id
-				if(item.getAssociationId() != null){
-				DisassociateAddressRequest request = new DisassociateAddressRequest();
-				if (item.getPublicIp() != null)
-					request.withPublicIp(item.getPublicIp());
-				request.withAssociationId(item.getAssociationId());
-				ec2.disassociateAddress(request);
+				if (item.getAssociationId() != null) {
+					DisassociateAddressRequest request = new DisassociateAddressRequest();
+					if (item.getPublicIp() != null)
+						request.withPublicIp(item.getPublicIp());
+					request.withAssociationId(item.getAssociationId());
+					ec2.disassociateAddress(request);
 				}
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
@@ -357,7 +559,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 					request.withAllocationId(item.getAllocationId());
 				else if (item.getPublicIp() != null)
 					request.withPublicIp(item.getPublicIp());
-				System.out.print(" "+item.getAllocationId()+";");
+				System.out.print(" " + item.getAllocationId() + ";");
 				ec2.releaseAddress(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
@@ -379,7 +581,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteSnapshotRequest request = new DeleteSnapshotRequest();
-				System.out.print(" "+item.getSnapshotId()+";");
+				System.out.print(" " + item.getSnapshotId() + ";");
 				request.withSnapshotId(item.getSnapshotId());
 				ec2.deleteSnapshot(request);
 			} catch (Exception e) {
@@ -403,7 +605,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 				try {
 					// remove by id
 					DeleteVolumeRequest request = new DeleteVolumeRequest();
-					System.out.print(" "+item.getVolumeId()+";");
+					System.out.print(" " + item.getVolumeId() + ";");
 					request.withVolumeId(item.getVolumeId());
 					ec2.deleteVolume(request);
 				} catch (Exception e) {
@@ -429,7 +631,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteDhcpOptionsRequest request = new DeleteDhcpOptionsRequest();
-				System.out.print(" "+item.getDhcpOptionsId()+";");
+				System.out.print(" " + item.getDhcpOptionsId() + ";");
 				request.withDhcpOptionsId(item.getDhcpOptionsId());
 				ec2.deleteDhcpOptions(request);
 			} catch (Exception e) {
@@ -452,7 +654,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeregisterImageRequest request = new DeregisterImageRequest();
-				System.out.println(" "+item.getImageId()+";");
+				System.out.println(" " + item.getImageId() + ";");
 				request.withImageId(item.getImageId());
 				ec2.deregisterImage(request);
 			} catch (Exception e) {
@@ -460,6 +662,139 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			}
 		}
 		System.out.println();
+	}
+
+	void removeAutoScalingGroups(AmazonAutoScaling as, String user) {
+		System.out.print("Removing AutoScalingGroups...");
+		String nextToken = null;
+		// get id
+		do {
+			DescribeAutoScalingGroupsRequest dRequest = new DescribeAutoScalingGroupsRequest();
+			if (nextToken != null)
+				dRequest.setNextToken(nextToken);
+			DescribeAutoScalingGroupsResult dResult = as.describeAutoScalingGroups();
+
+			nextToken = dResult.getNextToken();
+			for (AutoScalingGroup item : dResult.getAutoScalingGroups()) {
+				try {
+					for (com.amazonaws.services.autoscaling.model.TagDescription tag : item.getTags()) {
+						// remove by id
+						if (tag.getKey().compareTo("Owner") == 0 && tag.getValue().compareTo(user) == 0) {
+							DeleteAutoScalingGroupRequest request = new DeleteAutoScalingGroupRequest();
+							System.out.println(" " + item.getAutoScalingGroupName() + ";");
+							request.withAutoScalingGroupName(item.getAutoScalingGroupName());
+							as.deleteAutoScalingGroup(request);
+							break;
+						}
+					}
+				} catch (Exception e) {
+					System.out.println(e.getMessage());
+				}
+			}
+		} while (nextToken != null);
+		System.out.println();
+	}
+
+	void removeLoadBalancers(AmazonElasticLoadBalancing elb, ArrayList<String> vpcs, String user) {
+		System.out.print("Removing LoadBalancers and TargetGroups...");
+		String nextTokenBalancer = null;
+		// get id
+		do {
+			com.amazonaws.services.elasticloadbalancingv2.model.DescribeLoadBalancersRequest r1 = new com.amazonaws.services.elasticloadbalancingv2.model.DescribeLoadBalancersRequest();
+			if (nextTokenBalancer != null)
+				r1.setMarker(nextTokenBalancer);
+			com.amazonaws.services.elasticloadbalancingv2.model.DescribeLoadBalancersResult res1 = elb
+					.describeLoadBalancers(r1);
+			nextTokenBalancer = res1.getNextMarker();
+			ArrayList<String> resourceArns = new ArrayList<String>();
+			if (!res1.getLoadBalancers().isEmpty()) {
+				for (LoadBalancer lb : res1.getLoadBalancers()) {
+					if ( vpcs.stream().anyMatch(str -> str.compareTo(lb.getVpcId()) == 0)) {
+						DeleteLoadBalancerRequest request = new DeleteLoadBalancerRequest();
+						System.out.println(" " + lb.getLoadBalancerArn() + ";");
+						request.withLoadBalancerArn(lb.getLoadBalancerArn());
+						elb.deleteLoadBalancer(request);
+					}else
+						resourceArns.add(lb.getLoadBalancerArn());
+				}
+				com.amazonaws.services.elasticloadbalancingv2.model.DescribeTagsRequest dRequest = new com.amazonaws.services.elasticloadbalancingv2.model.DescribeTagsRequest();
+				dRequest.withResourceArns(resourceArns);
+				com.amazonaws.services.elasticloadbalancingv2.model.DescribeTagsResult dResult = elb
+						.describeTags(dRequest);
+
+				for (com.amazonaws.services.elasticloadbalancingv2.model.TagDescription tagDesc : dResult
+						.getTagDescriptions()) {
+					try {
+						for (Tag tag : tagDesc.getTags()) {
+							// remove by id
+							if (tag.getKey().compareTo("Owner") == 0 && tag.getValue().compareTo(user) == 0) {
+								if (tagDesc.getResourceArn().contains("targetgroup")) {
+									DeleteTargetGroupRequest request = new DeleteTargetGroupRequest();
+									System.out.println(" " + tagDesc.getResourceArn() + ";");
+									request.withTargetGroupArn(tagDesc.getResourceArn());
+									elb.deleteTargetGroup(request);
+								} else {
+									DeleteLoadBalancerRequest request = new DeleteLoadBalancerRequest();
+									System.out.println(" " + tagDesc.getResourceArn() + ";");
+									request.withLoadBalancerArn(tagDesc.getResourceArn());
+									elb.deleteLoadBalancer(request);
+								}
+								break;
+							}
+						}
+					} catch (Exception e) {
+						System.out.println(e.getMessage());
+					}
+				}
+			}
+		} while (nextTokenBalancer != null);
+		System.out.println();
+
+	}
+
+	void removeTargetGroups(AmazonElasticLoadBalancing elb, String user) {
+		System.out.print("Removing TargetGroups and TargetGroups...");
+		String nextTokenBalancer = null;
+		// get id
+		do {
+			com.amazonaws.services.elasticloadbalancingv2.model.DescribeTargetGroupsRequest r1 = new com.amazonaws.services.elasticloadbalancingv2.model.DescribeTargetGroupsRequest();
+			if (nextTokenBalancer != null)
+				r1.setMarker(nextTokenBalancer);
+			com.amazonaws.services.elasticloadbalancingv2.model.DescribeTargetGroupsResult res1 = elb
+					.describeTargetGroups(r1);
+			nextTokenBalancer = res1.getNextMarker();
+			ArrayList<String> resourceArns = new ArrayList<String>();
+			if (!res1.getTargetGroups().isEmpty()) {
+				for (com.amazonaws.services.elasticloadbalancingv2.model.TargetGroup lb : res1.getTargetGroups()) {
+					resourceArns.add(lb.getTargetGroupArn());
+
+				}
+				com.amazonaws.services.elasticloadbalancingv2.model.DescribeTagsRequest dRequest = new com.amazonaws.services.elasticloadbalancingv2.model.DescribeTagsRequest();
+				dRequest.withResourceArns(resourceArns);
+				com.amazonaws.services.elasticloadbalancingv2.model.DescribeTagsResult dResult = elb
+						.describeTags(dRequest);
+
+				for (com.amazonaws.services.elasticloadbalancingv2.model.TagDescription tagDesc : dResult
+						.getTagDescriptions()) {
+					try {
+						for (Tag tag : tagDesc.getTags()) {
+							// remove by id
+							if (tag.getKey().compareTo("Owner") == 0 && tag.getValue().compareTo(user) == 0) {
+								DeleteTargetGroupRequest request = new DeleteTargetGroupRequest();
+								System.out.println(" " + tagDesc.getResourceArn() + ";");
+								request.withTargetGroupArn(tagDesc.getResourceArn());
+								elb.deleteTargetGroup(request);
+								break;
+							}
+						}
+					} catch (Exception e) {
+						System.out.println(e.getMessage());
+					}
+				}
+			}
+		} while (nextTokenBalancer != null);
+		System.out.println();
+
 	}
 
 	void removeNetworkInterfaces(AmazonEC2 ec2, ArrayList<String> vpcs) {
@@ -475,7 +810,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteNetworkInterfaceRequest request = new DeleteNetworkInterfaceRequest();
-				System.out.print(" "+item.getNetworkInterfaceId()+";");
+				System.out.print(" " + item.getNetworkInterfaceId() + ";");
 				request.withNetworkInterfaceId(item.getNetworkInterfaceId());
 				ec2.deleteNetworkInterface(request);
 			} catch (Exception e) {
@@ -498,7 +833,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteNetworkInterfaceRequest request = new DeleteNetworkInterfaceRequest();
-				System.out.print(" "+item.getNetworkInterfaceId()+";");
+				System.out.print(" " + item.getNetworkInterfaceId() + ";");
 				request.withNetworkInterfaceId(item.getNetworkInterfaceId());
 				ec2.deleteNetworkInterface(request);
 			} catch (Exception e) {
@@ -521,7 +856,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteLaunchTemplateRequest request = new DeleteLaunchTemplateRequest();
-				System.out.print(" "+item.getLaunchTemplateId()+";");
+				System.out.print(" " + item.getLaunchTemplateId() + ";");
 				request.withLaunchTemplateId(item.getLaunchTemplateId());
 				ec2.deleteLaunchTemplate(request);
 			} catch (Exception e) {
@@ -530,7 +865,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 		}
 		System.out.println();
 	}
-	
+
 	void removeLaunchTemplates(AmazonEC2 ec2, String user) {
 		System.out.print("Removing LaunchTemplates by tag...");
 		// get id
@@ -544,7 +879,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteLaunchTemplateRequest request = new DeleteLaunchTemplateRequest();
-				System.out.print(" "+item.getLaunchTemplateId()+";");
+				System.out.print(" " + item.getLaunchTemplateId() + ";");
 				request.withLaunchTemplateId(item.getLaunchTemplateId());
 				ec2.deleteLaunchTemplate(request);
 			} catch (Exception e) {
@@ -567,7 +902,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				CancelSpotInstanceRequestsRequest request = new CancelSpotInstanceRequestsRequest();
-				System.out.print(" "+item.getSpotInstanceRequestId()+";");
+				System.out.print(" " + item.getSpotInstanceRequestId() + ";");
 				request.withSpotInstanceRequestIds(item.getSpotInstanceRequestId());
 				ec2.cancelSpotInstanceRequests(request);
 			} catch (Exception e) {
@@ -575,6 +910,34 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			}
 		}
 		System.out.println();
+	}
+
+	void removeScheduledInstances(AmazonEC2 ec2, ArrayList<String> vpcs, String user) {
+		try {
+			System.out.print("Removing ScheduledInstances...");
+			// get id
+			DescribeScheduledInstancesRequest dRequest = new DescribeScheduledInstancesRequest();
+			Filter filter = new Filter();
+			filter.withName("tag:Owner").withValues(user);
+			dRequest.withFilters(filter);
+			DescribeScheduledInstancesResult dResult = ec2.describeScheduledInstances(dRequest);
+			for (ScheduledInstance item : dResult.getScheduledInstanceSet()) {
+
+				try {
+					// remove by id
+					disableInstanceLock(ec2, item.getScheduledInstanceId());
+					TerminateInstancesRequest request = new TerminateInstancesRequest();
+					System.out.print(" " + item.getScheduledInstanceId() + ";");
+					request.withInstanceIds(item.getScheduledInstanceId());
+					ec2.terminateInstances(request);
+				} catch (Exception e) {
+					System.out.println(e.getMessage());
+				}
+			}
+			System.out.println();
+		} catch (Exception e) {
+			System.out.println(e.getMessage());
+		}
 	}
 
 	void removeBundleTasks(AmazonEC2 ec2, ArrayList<String> vpcs, String user) {
@@ -590,7 +953,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				CancelBundleTaskRequest request = new CancelBundleTaskRequest();
-				System.out.print(" "+item.getBundleId()+";");
+				System.out.print(" " + item.getBundleId() + ";");
 				request.withBundleId(item.getBundleId());
 				ec2.cancelBundleTask(request);
 			} catch (Exception e) {
@@ -637,7 +1000,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteRouteTableRequest request = new DeleteRouteTableRequest();
-				System.out.print(" "+item.getRouteTableId()+";");
+				System.out.print(" " + item.getRouteTableId() + ";");
 				request.withRouteTableId(item.getRouteTableId());
 				ec2.deleteRouteTable(request);
 			} catch (Exception e) {
@@ -684,7 +1047,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteRouteTableRequest request = new DeleteRouteTableRequest();
-				System.out.print(" "+item.getRouteTableId()+";");
+				System.out.print(" " + item.getRouteTableId() + ";");
 				request.withRouteTableId(item.getRouteTableId());
 				ec2.deleteRouteTable(request);
 			} catch (Exception e) {
@@ -725,7 +1088,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteSecurityGroupRequest request = new DeleteSecurityGroupRequest();
-				System.out.print(" "+item.getGroupId()+";");
+				System.out.print(" " + item.getGroupId() + ";");
 				request.withGroupId(item.getGroupId());
 				ec2.deleteSecurityGroup(request);
 			} catch (Exception e) {
@@ -766,7 +1129,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteSecurityGroupRequest request = new DeleteSecurityGroupRequest();
-				System.out.print(" "+item.getGroupId()+";");
+				System.out.print(" " + item.getGroupId() + ";");
 				request.withGroupId(item.getGroupId());
 				ec2.deleteSecurityGroup(request);
 			} catch (Exception e) {
@@ -789,7 +1152,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteVpcPeeringConnectionRequest request = new DeleteVpcPeeringConnectionRequest();
-				System.out.print(" "+item.getVpcPeeringConnectionId()+";");
+				System.out.print(" " + item.getVpcPeeringConnectionId() + ";");
 				request.withVpcPeeringConnectionId(item.getVpcPeeringConnectionId());
 				ec2.deleteVpcPeeringConnection(request);
 			} catch (Exception e) {
@@ -806,7 +1169,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteVpcPeeringConnectionRequest request = new DeleteVpcPeeringConnectionRequest();
-				System.out.print(" "+item.getVpcPeeringConnectionId()+";");
+				System.out.print(" " + item.getVpcPeeringConnectionId() + ";");
 				request.withVpcPeeringConnectionId(item.getVpcPeeringConnectionId());
 				ec2.deleteVpcPeeringConnection(request);
 			} catch (Exception e) {
@@ -829,7 +1192,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteVpcPeeringConnectionRequest request = new DeleteVpcPeeringConnectionRequest();
-				System.out.print(" "+item.getVpcPeeringConnectionId()+";");
+				System.out.print(" " + item.getVpcPeeringConnectionId() + ";");
 				request.withVpcPeeringConnectionId(item.getVpcPeeringConnectionId());
 				ec2.deleteVpcPeeringConnection(request);
 			} catch (Exception e) {
@@ -852,7 +1215,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteVpcEndpointsRequest request = new DeleteVpcEndpointsRequest();
-				System.out.print(" "+item.getVpcEndpointId()+";");
+				System.out.print(" " + item.getVpcEndpointId() + ";");
 				request.withVpcEndpointIds(item.getVpcEndpointId());
 				ec2.deleteVpcEndpoints(request);
 			} catch (Exception e) {
@@ -870,7 +1233,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteVpcEndpointsRequest request = new DeleteVpcEndpointsRequest();
-				System.out.print(" "+item.getVpcEndpointId()+";");
+				System.out.print(" " + item.getVpcEndpointId() + ";");
 				request.withVpcEndpointIds(item.getVpcEndpointId());
 				ec2.deleteVpcEndpoints(request);
 			} catch (Exception e) {
@@ -902,7 +1265,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteInternetGatewayRequest request = new DeleteInternetGatewayRequest();
-				System.out.print(" "+item.getInternetGatewayId()+";");
+				System.out.print(" " + item.getInternetGatewayId() + ";");
 				request.withInternetGatewayId(item.getInternetGatewayId());
 				ec2.deleteInternetGateway(request);
 			} catch (Exception e) {
@@ -911,7 +1274,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 		}
 		System.out.println();
 	}
-	
+
 	void removeInternetGateways(AmazonEC2 ec2, String user) {
 		System.out.print("Removing InternetGateways by tag...");
 		// get id
@@ -934,7 +1297,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteInternetGatewayRequest request = new DeleteInternetGatewayRequest();
-				System.out.print(" "+item.getInternetGatewayId()+";");
+				System.out.print(" " + item.getInternetGatewayId() + ";");
 				request.withInternetGatewayId(item.getInternetGatewayId());
 				ec2.deleteInternetGateway(request);
 			} catch (Exception e) {
@@ -956,7 +1319,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteCustomerGatewayRequest request = new DeleteCustomerGatewayRequest();
-				System.out.print(" "+item.getCustomerGatewayId()+";");
+				System.out.print(" " + item.getCustomerGatewayId() + ";");
 				request.withCustomerGatewayId(item.getCustomerGatewayId());
 				ec2.deleteCustomerGateway(request);
 			} catch (Exception e) {
@@ -972,7 +1335,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteCustomerGatewayRequest request = new DeleteCustomerGatewayRequest();
-				System.out.print(" "+item+";");
+				System.out.print(" " + item + ";");
 				request.withCustomerGatewayId(item);
 				ec2.deleteCustomerGateway(request);
 			} catch (Exception e) {
@@ -996,7 +1359,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteVpnConnectionRequest request = new DeleteVpnConnectionRequest();
-				System.out.print(" "+item.getVpnConnectionId()+";");
+				System.out.print(" " + item.getVpnConnectionId() + ";");
 				request.withVpnConnectionId(item.getVpnConnectionId());
 				ec2.deleteVpnConnection(request);
 			} catch (Exception e) {
@@ -1023,7 +1386,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteVpnConnectionRequest request = new DeleteVpnConnectionRequest();
-				System.out.print(" "+item.getVpnConnectionId()+";");
+				System.out.print(" " + item.getVpnConnectionId() + ";");
 				request.withVpnConnectionId(item.getVpnConnectionId());
 				ec2.deleteVpnConnection(request);
 			} catch (Exception e) {
@@ -1049,7 +1412,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteNetworkAclRequest request = new DeleteNetworkAclRequest();
-				System.out.print(" "+item.getNetworkAclId()+";");
+				System.out.print(" " + item.getNetworkAclId() + ";");
 				request.withNetworkAclId(item.getNetworkAclId());
 				ec2.deleteNetworkAcl(request);
 			} catch (Exception e) {
@@ -1058,7 +1421,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 		}
 		System.out.println();
 	}
-	
+
 	void removeNetworkAcls(AmazonEC2 ec2, String user) {
 		System.out.print("Removing NetworkAcls by tag...");
 		// get id
@@ -1072,7 +1435,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteNetworkAclRequest request = new DeleteNetworkAclRequest();
-				System.out.print(" "+item.getNetworkAclId()+";");
+				System.out.print(" " + item.getNetworkAclId() + ";");
 				request.withNetworkAclId(item.getNetworkAclId());
 				ec2.deleteNetworkAcl(request);
 			} catch (Exception e) {
@@ -1095,7 +1458,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteSubnetRequest request = new DeleteSubnetRequest();
-				System.out.print(" "+item.getSubnetId()+";");
+				System.out.print(" " + item.getSubnetId() + ";");
 				request.withSubnetId(item.getSubnetId());
 				ec2.deleteSubnet(request);
 			} catch (Exception e) {
@@ -1118,9 +1481,34 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 			try {
 				// remove by id
 				DeleteSubnetRequest request = new DeleteSubnetRequest();
-				System.out.print(" "+item.getSubnetId()+";");
+				System.out.print(" " + item.getSubnetId() + ";");
 				request.withSubnetId(item.getSubnetId());
 				ec2.deleteSubnet(request);
+			} catch (Exception e) {
+				System.out.println(e.getMessage());
+			}
+		}
+		System.out.println();
+	}
+
+	void removeKeyPairs(AmazonEC2 ec2, String user) {
+		System.out.print("Removing KeyPairs by tag...");
+		// get id
+		DescribeTagsRequest dRequest = new DescribeTagsRequest();
+		Filter filter = new Filter();
+		filter.withName("key").withValues("Owner");
+		Filter filter2 = new Filter();
+		filter2.withName("value").withValues(user);
+		dRequest.withFilters(filter, filter2);
+		DescribeTagsResult dResult = ec2.describeTags(dRequest);
+		for (TagDescription item : dResult.getTags()) {
+
+			try {
+				// remove by id
+				DeleteKeyPairRequest request = new DeleteKeyPairRequest();
+				System.out.print(" " + item.getResourceId() + ";");
+				request.withKeyName(item.getResourceId());
+				ec2.deleteKeyPair(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
 			}
@@ -1140,7 +1528,8 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 				ec2.deleteVpc(request);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
-				canDeactivateUser = false;
+				if (!e.getMessage().contains("not exist"))
+					canDeactivateUser = false;
 			}
 		}
 		return canDeactivateUser;
@@ -1170,7 +1559,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 
 			try {
 				DeleteVpnGatewayRequest request = new DeleteVpnGatewayRequest();
-				System.out.print(" "+item.getVpnGatewayId()+";");
+				System.out.print(" " + item.getVpnGatewayId() + ";");
 				request.withVpnGatewayId(item.getVpnGatewayId());
 				ec2.deleteVpnGateway(request);
 			} catch (Exception e) {
@@ -1205,7 +1594,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 
 			try {
 				DeleteVpnGatewayRequest request = new DeleteVpnGatewayRequest();
-				System.out.print(" "+item.getVpnGatewayId()+";");
+				System.out.print(" " + item.getVpnGatewayId() + ";");
 				request.withVpnGatewayId(item.getVpnGatewayId());
 				ec2.deleteVpnGateway(request);
 			} catch (Exception e) {
@@ -1227,7 +1616,7 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 					try {
 						// remove by id
 						DeleteEgressOnlyInternetGatewayRequest request = new DeleteEgressOnlyInternetGatewayRequest();
-						System.out.print(" "+item.getEgressOnlyInternetGatewayId()+";");
+						System.out.print(" " + item.getEgressOnlyInternetGatewayId() + ";");
 						request.withEgressOnlyInternetGatewayId(item.getEgressOnlyInternetGatewayId());
 						ec2.deleteEgressOnlyInternetGateway(request);
 					} catch (Exception e) {
@@ -1256,16 +1645,18 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 		HashMap<String, AttributeValue> values = new HashMap<String, AttributeValue>();
 		values.put(":user", (new AttributeValue()).withS(user));
 		values.put(":r", (new AttributeValue()).withS(region));
-		ScanRequest request = new ScanRequest().withTableName(resourceTable).withFilterExpression("#U = :user AND ResourceRegion = :r")
-				.withExpressionAttributeValues(values).withExpressionAttributeNames(keys);
+		ScanRequest request = new ScanRequest().withTableName(resourceTable)
+				.withFilterExpression("#U = :user AND ResourceRegion = :r").withExpressionAttributeValues(values)
+				.withExpressionAttributeNames(keys);
 		ScanResult response = db.scan(request);
 		for (Map<String, AttributeValue> item : response.getItems()) {
 
 			// remove user resources
 			try {
 				DeleteItemRequest dRequest = new DeleteItemRequest();
-				System.out.print(" "+item.get("ResourceId").getS()+";");
-				dRequest.withTableName(resourceTable).addKeyEntry("ResourceId", item.get("ResourceId")).addKeyEntry("ResourceRegion", item.get("ResourceRegion"));
+				System.out.print(" " + item.get("ResourceId").getS() + ";");
+				dRequest.withTableName(resourceTable).addKeyEntry("ResourceId", item.get("ResourceId"))
+						.addKeyEntry("ResourceRegion", item.get("ResourceRegion"));
 				db.deleteItem(dRequest);
 			} catch (Exception e) {
 				System.out.println(e.getMessage());
@@ -1275,16 +1666,56 @@ public class ResourceDeleteRequestHandler implements RequestStreamHandler {
 		System.out.println();
 	}
 
-	void deactivateUser(AmazonDynamoDB db, String userTable, String resourceTable, ArrayList<String> users) {
+	void deactivateUser(AmazonDynamoDB db, String userTable, String resourceTable, String user) {
 		System.out.println("Deactivating user...");
 		// set user inactive
 		UpdateItemRequest uRequest = new UpdateItemRequest();
 		HashMap<String, AttributeValue> uValues = new HashMap<String, AttributeValue>();
 		HashMap<String, AttributeValue> uKey = new HashMap<String, AttributeValue>();
 		uValues.put(":a", (new AttributeValue()).withBOOL(false));
-		uKey.put("Email", (new AttributeValue()).withSS(users));
-		uRequest.withTableName(userTable).withExpressionAttributeValues(uValues).withUpdateExpression("Active = :a")
+		uKey.put("Email", (new AttributeValue()).withS(user));
+		uRequest.withTableName(userTable).withExpressionAttributeValues(uValues).withUpdateExpression("SET Active = :a REMOVE RetryCount, NextRetryDate")
 				.withKey(uKey);
+		db.updateItem(uRequest);
+
+		uRequest = new UpdateItemRequest();
+		uRequest.withTableName(userTable).withUpdateExpression("REMOVE ProcessedRegions").withKey(uKey);
+		db.updateItem(uRequest);
+	}
+	
+	void setUserRetry(AmazonDynamoDB db, String userTable, int retryCount, String user) {
+		System.out.println("Updating user retry...");
+		// set user inactive
+		UpdateItemRequest uRequest = new UpdateItemRequest();
+		HashMap<String, AttributeValue> uValues = new HashMap<String, AttributeValue>();
+		HashMap<String, AttributeValue> uKey = new HashMap<String, AttributeValue>();
+		if(retryCount == 3)
+			retryCount = 0;
+		else
+			retryCount++;
+		int now = (int) System.currentTimeMillis() / 1000 + 60*60*2;
+		uValues.put(":r", (new AttributeValue()).withN(Integer.toString(retryCount)));
+		uValues.put(":d", (new AttributeValue()).withN(Integer.toString(now)));
+		uKey.put("Email", (new AttributeValue()).withS(user));
+		uRequest.withTableName(userTable).withExpressionAttributeValues(uValues).withUpdateExpression("SET RetryCount = :r, NextRetryDate = :d")
+				.withKey(uKey);
+		db.updateItem(uRequest);
+
+		uRequest = new UpdateItemRequest();
+		uRequest.withTableName(userTable).withUpdateExpression("REMOVE ProcessedRegions").withKey(uKey);
+		db.updateItem(uRequest);
+	}
+
+	void updateProcessedRegions(AmazonDynamoDB db, String userTable, String processedRegions, String user) {
+		System.out.println("Update processed regions...");
+		// set user inactive
+		UpdateItemRequest uRequest = new UpdateItemRequest();
+		HashMap<String, AttributeValue> uValues = new HashMap<String, AttributeValue>();
+		HashMap<String, AttributeValue> uKey = new HashMap<String, AttributeValue>();
+		uValues.put(":r", (new AttributeValue()).withS(processedRegions));
+		uKey.put("Email", (new AttributeValue()).withS(user));
+		uRequest.withTableName(userTable).withExpressionAttributeValues(uValues)
+				.withUpdateExpression("SET ProcessedRegions = :r").withKey(uKey);
 		db.updateItem(uRequest);
 	}
 
